@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>Video Segmen 5 Detik</title>
+</head>
+<body>
+  <video id="video" width="640" muted autoplay></video>
+
+  <script>
+    const segments = [
+      [0, 5],
+      [5, 10],
+      [10, 15],
+      [15, 20],
+      [20, 25],
+      [25, 30]
+    ];
+
+    const video = document.getElementById('video');
+    let currentSegment = 0;
+
+    // Atur sumber video
+    video.src = "video.mp4";
+    video.load();
+
+    // Setelah metadata dimuat, mulai dari awal segmen pertama
+    video.addEventListener('loadedmetadata', () => {
+      video.currentTime = segments[0][0];
+      video.play();
+    });
+
+    // Loop tiap segmen: ketika lewat batas akhir, pindah ke segmen berikutnya
+    video.addEventListener('timeupdate', () => {
+      const end = segments[currentSegment][1];
+      if (video.currentTime >= end) {
+        currentSegment++;
+        if (currentSegment < segments.length) {
+          video.currentTime = segments[currentSegment][0];
+        } else {
+          video.pause(); // Selesai semua segmen
+        }
+      }
+    });
+  </script>
+</body>
+</html>
