@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Segments</title>
+</head>
+<body>
+    <h1>Video Terpotong Setiap 5 Detik</h1>
+
+    <video id="player" width="640" height="360" controls></video>
+
+    <script>
+        const segments = [
+            "output/segment_000.mp4",
+            "output/segment_001.mp4",
+            "output/segment_002.mp4",
+            // Tambahkan semua segmen yang ada
+        ];
+
+        const video = document.getElementById("player");
+        let current = 0;
+
+        function playNext() {
+            if (current < segments.length) {
+                video.src = segments[current];
+                video.play();
+                current++;
+            }
+        }
+
+        video.addEventListener("ended", playNext);
+
+        // Mulai mainkan video pertama
+        playNext();
+    </script>
+</body>
+</html>
