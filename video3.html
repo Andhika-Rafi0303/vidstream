@@ -1,91 +1,102 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Video Segments</title>
-    <style>
-        #buffering {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background-color: rgba(0, 0, 0, 0.7);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 10px;
-            display: none;
-            font-size: 18px;
-            z-index: 999;
-        }
-
-        #container {
-            position: relative;
-            width: 640px;
-            height: 360px;
-        }
-    </style>
+  <title>Segmented MP4 Streaming</title>
+  <style>
+    body {
+      font-family: sans-serif;
+    }
+    table {
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 8px 12px;
+    }
+  </style>
 </head>
 <body>
-    <h1>Video Terpotong Setiap 5 Detik</h1>
+  <center>
+    <h1>Streaming Segmented MP4</h1>
+    <video id="video" width="640" height="360" controls autoplay muted></video>
+  </center>
 
-    <div id="container">
-        <video id="player" width="640" height="360" controls autoplay muted></video>
-        <div id="buffering">Buffering...</div>
-    </div>
+  <p><strong>Total ReBuffer:</strong> <span id="buffer">0</span></p>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Segment Number</th>
+        <th>Rebuffer Delay (ms)</th>
+      </tr>
+    </thead>
+    <tbody id="log"></tbody>
+  </table>
 
-    <script>
-        const segments = [
-            "output/segment_000.mp4",
-            "output/segment_001.mp4",
-            "output/segment_002.mp4",
-            // Tambahkan semua segmen
-        ];
+  <script>
+    const segments = [
+      "output/segment_000.mp4",
+      "output/segment_001.mp4",
+      "output/segment_002.mp4",
+      // Tambahkan lebih banyak jika ada
+    ];
 
-        const video = document.getElementById("player");
-        const buffering = document.getElementById("buffering");
-        let current = 0;
+    const video = document.getElementById("video");
+    const bufferDisplay = document.getElementById("buffer");
+    const logElement = document.getElementById("log");
 
-        // Buffer video element
-        const bufferVideo = document.createElement('video');
-        bufferVideo.preload = 'auto';
-        bufferVideo.muted = true;
+    let current = 0;
+    let rebufferCount = 0;
+    let rebufferStart = 0;
+    let rebufferLog = [];
 
-        function showBuffering(show) {
-            buffering.style.display = show ? 'block' : 'none';
-        }
+    function playSegment(index) {
+      if (index >= segments.length) return;
 
-        function playSegment(index) {
-            if (index >= segments.length) return;
+      video.src = segments[index];
+      video.load();
+      video.play().catch(e => console.warn("Autoplay diblokir:", e));
+    }
 
-            showBuffering(true);
-            video.src = segments[index];
-            video.load();
-            video.play().catch(e => console.warn("Autoplay diblokir:", e));
+    // Event saat buffering
+    video.addEventListener("waiting", () => {
+      rebufferStart = performance.now();
+      rebufferCount++;
+      bufferDisplay.innerText = rebufferCount;
+    });
 
-            current = index + 1;
+    // Event saat playback lanjut
+    video.addEventListener("playing", () => {
+      if (rebufferStart > 0) {
+        const delay = Math.round(performance.now() - rebufferStart);
+        rebufferLog.push({ segment: current, delay });
 
-            // Preload next segment
-            if (current < segments.length) {
-                bufferVideo.src = segments[current];
-                bufferVideo.load();
-            }
-        }
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${rebufferLog.length}</td>
+          <td>${current}</td>
+          <td>${delay}</td>
+        `;
+        logElement.appendChild(row);
 
-        video.addEventListener("ended", () => {
-            if (current < segments.length) {
-                playSegment(current);
-            }
-        });
+        rebufferStart = 0;
+      }
+    });
 
-        video.addEventListener("waiting", () => {
-            showBuffering(true);
-        });
-
-        video.addEventListener("playing", () => {
-            showBuffering(false);
-        });
-
-        // Start the first segment
+    // Event saat segmen selesai diputar
+    video.addEventListener("ended", () => {
+      current++;
+      if (current < segments.length) {
         playSegment(current);
-    </script>
+      } else {
+        console.log("Streaming selesai");
+        console.log("Rebuffer log:", rebufferLog);
+      }
+    });
+
+    // Mulai dengan segmen pertama
+    playSegment(current);
+  </script>
 </body>
 </html>
