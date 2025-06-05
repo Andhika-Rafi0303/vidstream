@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MSE Streaming Segmented MP4</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 20px; }
+    video { width: 640px; height: 360px; background: #000; }
+  </style>
+</head>
+<body>
+  <h1>Streaming with Media Source Extensions</h1>
+  <video id="video" controls autoplay muted></video>
+  <p><strong>Status:</strong> <span id="status">Loading...</span></p>
+
+  <script>
+    const video = document.getElementById("video");
+    const status = document.getElementById("status");
+
+    const segments = [
+      "output/segment_000.mp4",
+      "output/segment_001.mp4",
+      "output/segment_002.mp4"
+      // Tambah sesuai jumlah segmen
+    ];
+
+    if (!window.MediaSource) {
+      status.textContent = "MediaSource not supported in this browser.";
+    } else {
+      const mediaSource = new MediaSource();
+      video.src = URL.createObjectURL(mediaSource);
+
+      mediaSource.addEventListener("sourceopen", async () => {
+        const mime = 'video/mp4; codecs="avc1.64001e, mp4a.40.2"'; // Ubah sesuai codec segmen kamu
+
+        const sourceBuffer = mediaSource.addSourceBuffer(mime);
+        sourceBuffer.mode = 'segments';
+
+        let current = 0;
+
+        async function fetchSegment(url) {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return await res.arrayBuffer();
+        }
+
+        async function appendNext() {
+          if (current >= segments.length) {
+            mediaSource.endOfStream();
+            status.textContent = "All segments played.";
+            return;
+          }
+
+          status.textContent = `Loading segment ${current}...`;
+          try {
+            const data = await fetchSegment(segments[current]);
+            sourceBuffer.appendBuffer(data);
+            current++;
+          } catch (err) {
+            status.textContent = `Error loading segment: ${err.message}`;
+          }
+        }
+
+        sourceBuffer.addEventListener("updateend", appendNext);
+
+        // Start playback by appending first segment
+        appendNext();
+      });
+    }
+  </script>
+</body>
+</html>
