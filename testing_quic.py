@@ -10,7 +10,7 @@ from aioquic.h3.connection import H3_ALPN
 USER_AGENT = b"aioquic-client"
 
 async def http3_qos_request(url, source_ip='0.0.0.0'):
-    sock = None  # Deklarasikan di sini untuk memastikan bisa diakses di blok finally
+    sock = None
     try:
         parsed = urlparse(url)
         host = parsed.hostname
@@ -23,11 +23,19 @@ async def http3_qos_request(url, source_ip='0.0.0.0'):
             verify_mode=ssl.CERT_NONE
         )
 
-        # Bind to specific IP dengan socket reuse
-        local_addr = (source_ip, 0)
+        # Setup socket dengan reuse address dan port
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Ini yang penting!
-        sock.bind(local_addr)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except AttributeError:
+            pass  # SO_REUSEPORT tidak tersedia di semua sistem
+
+        sock.bind((source_ip, 0))
+
+        # Gunakan timeout untuk socket
+        sock.settimeout(10)
 
         # Measure RTT
         start_rtt = time.time()
@@ -60,11 +68,15 @@ async def http3_qos_request(url, source_ip='0.0.0.0'):
             start_latency = time.time()
 
             while True:
-                event = await client.wait_for_event()
-                if event is None:
+                try:
+                    event = await asyncio.wait_for(client.wait_for_event(), timeout=10)
+                    if event is None:
+                        break
+                    if hasattr(event, "data") and event.data:
+                        body += event.data
+                except asyncio.TimeoutError:
+                    print("Timeout saat menunggu event")
                     break
-                if hasattr(event, "data") and event.data:
-                    body += event.data
 
             latency = (time.time() - start_latency) * 1000
             total_kb = len(body) / 1024
@@ -78,40 +90,52 @@ async def http3_qos_request(url, source_ip='0.0.0.0'):
             }
 
     except Exception as e:
-        print(f"💥 Error during request: {e}")
+        print(f"💥 Error: {str(e)}")
         return None
     finally:
-        if sock is not None:  # Pastikan socket selalu ditutup
-            sock.close()
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
+
+async def run_requests(url, source_ip, num_requests):
+    results = []
+    for i in range(num_requests):
+        print(f"🚀 Menjalankan request {i+1}/{num_requests}")
+        result = await http3_qos_request(url, source_ip)
+        if result:
+            results.append(result)
+        await asyncio.sleep(1)  # Jeda antar request
+    return results
 
 def measure_multiple_requests(url, source_ip, num_requests=5):
-    results = []
+    try:
+        loop = asyncio.get_event_loop()
+    except:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    async def runner():
-        tasks = []
-        for _ in range(num_requests):
-            task = asyncio.create_task(http3_qos_request(url, source_ip))
-            tasks.append(task)
-        
-        for task in tasks:
-            result = await task
-            if result:
-                results.append(result)
-            await asyncio.sleep(1)  # Jeda antara request
-
-    asyncio.run(runner())
+    results = loop.run_until_complete(run_requests(url, source_ip, num_requests))
 
     if results:
         avg = lambda key: sum(r[key] for r in results) / len(results)
-        print(f"\n🔥 Total Request: {len(results)}")
+        print(f"\n📊 Hasil Pengujian:")
+        print(f"🔥 Total Request Berhasil: {len(results)}/{num_requests}")
         print(f"⚡ Rata-rata RTT: {avg('rtt_ms'):.2f} ms")
         print(f"⏱️ Rata-rata Latency: {avg('latency_ms'):.2f} ms")
-        print(f"📦 Rata-rata Size: {avg('total_size_kb'):.2f} KB")
+        print(f"📦 Rata-rata Ukuran: {avg('total_size_kb'):.2f} KB")
         print(f"🚀 Rata-rata Throughput: {avg('throughput_kbps'):.2f} KB/s")
     else:
-        print("❌ Tidak ada hasil yang berhasil.")
+        print("❌ Tidak ada request yang berhasil")
 
 if __name__ == "__main__":
-    url = "https://12.12.12.2/index10.html"
-    source_ip = "10.45.0.10"
-    measure_multiple_requests(url, source_ip, num_requests=5)
+    # Konfigurasi pengujian
+    TEST_URL = "https://quic.nginx.org/"  # Server test QUIC
+    # TEST_URL = "https://cloudflare-quic.com/"  # Alternatif
+    SOURCE_IP = "0.0.0.0"  # Gunakan IP lokal yang sesuai jika perlu
+    REQUEST_COUNT = 5
+    
+    print("🔧 Memulai pengujian HTTP/3...")
+    measure_multiple_requests(TEST_URL, SOURCE_IP, REQUEST_COUNT)
+    print("✅ Pengujian selesai")
