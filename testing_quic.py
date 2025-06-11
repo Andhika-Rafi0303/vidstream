@@ -73,7 +73,7 @@ class QUICClient:
             }
 
 class H3ClientProtocol(asyncio.Protocol):
-    def __init__(self, quic):
+    def __init__(self, quic, stream_handler=None, **kwargs):
         self.quic = quic
         self._http = BaseH3Connection(self.quic)
         self._events = asyncio.Queue()
