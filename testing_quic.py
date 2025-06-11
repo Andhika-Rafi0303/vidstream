@@ -1,12 +1,11 @@
 import asyncio
 import socket
-from aioquic.asyncio import QuicConnectionProtocol, serve
+from typing import Dict, Optional, cast
+from aioquic.asyncio import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import StreamDataReceived
-from aioquic.asyncio.client import connect
-from aioquic.h3.connection import H3_ALPN
+from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import HeadersReceived, DataReceived, H3Event
-from typing import Dict, Optional
+from aioquic.asyncio.client import connect
 
 class HttpQuicClientProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs):
@@ -16,35 +15,43 @@ class HttpQuicClientProtocol(QuicConnectionProtocol):
         self._request_response: Dict[int, bytes] = {}
         self._request_headers: Dict[int, Dict] = {}
 
-    async def get(self, url: str, headers: Dict = {}):
-        # Buat stream baru
+    async def get(self, url: str, headers: Dict = None):
+        if headers is None:
+            headers = {}
+            
+        # Parse URL components
+        url_parts = url.split("/")
+        host = url_parts[2]
+        path = "/" + "/".join(url_parts[3:]) if len(url_parts) > 3 else "/"
+
+        # Get next available stream ID
         stream_id = self._quic.get_next_available_stream_id()
         
-        # Inisialisasi HTTP/3 connection jika belum ada
+        # Initialize HTTP/3 connection if not exists
         if self._http is None:
             self._http = H3Connection(self._quic)
         
-        # Kirim request headers
+        # Send request headers
         self._http.send_headers(
             stream_id=stream_id,
             headers=[
                 (b":method", b"GET"),
                 (b":scheme", b"https"),
-                (b":authority", url.split("/")[2].encode()),
-                (b":path", url.split("/")[3].encode()),
+                (b":authority", host.encode()),
+                (b":path", path.encode()),
                 *[(k.encode(), v.encode()) for k, v in headers.items()],
             ],
         )
         
-        # Akhiri stream
+        # End the stream
         self._quic.send_stream_data(stream_id, b"", end_stream=True)
         
-        # Tunggu response
+        # Wait for response
         event = asyncio.Event()
         self._request_events[stream_id] = event
         await event.wait()
         
-        # Kembalikan response
+        # Return response
         return {
             "headers": self._request_headers.pop(stream_id),
             "content": self._request_response.pop(stream_id),
@@ -57,14 +64,14 @@ class HttpQuicClientProtocol(QuicConnectionProtocol):
         
     def h3_event_received(self, event: H3Event):
         if isinstance(event, HeadersReceived):
-            # Simpan headers response
+            # Store response headers
             headers = {}
             for header, value in event.headers:
                 headers[header.decode()] = value.decode()
             self._request_headers[event.stream_id] = headers
             
         elif isinstance(event, DataReceived):
-            # Simpan data response
+            # Store response data
             if event.stream_id not in self._request_response:
                 self._request_response[event.stream_id] = b""
             self._request_response[event.stream_id] += event.data
@@ -78,46 +85,80 @@ async def make_quic_request(
     local_ip: str,
     headers: Dict = None,
     timeout: float = 10.0,
+    retries: int = 3,
 ):
-    # Konfigurasi QUIC
+    if headers is None:
+        headers = {}
+
+    # QUIC configuration
     configuration = QuicConfiguration(
         is_client=True,
         alpn_protocols=H3_ALPN,
-        verify_mode=False  # Nonaktifkan verifikasi sertifikat untuk contoh
+        verify_mode=False  # Disable cert verification for testing
     )
     
-    # Buat socket dengan binding ke IP lokal
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((local_ip, 0))  # Binding ke IP lokal, port acak
+    # Parse host from URL
+    host = url.split("/")[2]
     
-    # Buat koneksi QUIC
-    async with connect(
-        host=url.split("/")[2],
-        port=443,
-        configuration=configuration,
-        create_protocol=HttpQuicClientProtocol,
-        local_port=sock.getsockname()[1],
-    ) as client:
-        client = cast(HttpQuicClientProtocol, client)
-        
-        # Lakukan request dengan timeout
+    last_error = None
+    for attempt in range(retries):
         try:
-            response = await asyncio.wait_for(
-                client.get(url, headers or {}),
-                timeout=timeout,
-            )
-            return response
-        except asyncio.TimeoutError:
-            print("Request timeout")
-            return None
+            # Create UDP socket with SO_REUSEADDR
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((local_ip, 0))  # Bind to local IP with random port
+            
+            try:
+                async with connect(
+                    host=host,
+                    port=443,
+                    configuration=configuration,
+                    create_protocol=HttpQuicClientProtocol,
+                    local_port=sock.getsockname()[1],
+                ) as client:
+                    client = cast(HttpQuicClientProtocol, client)
+                    
+                    try:
+                        response = await asyncio.wait_for(
+                            client.get(url, headers),
+                            timeout=timeout,
+                        )
+                        return response
+                    except asyncio.TimeoutError:
+                        print(f"Attempt {attempt + 1}: Request timeout")
+                        last_error = "Timeout"
+                    except Exception as e:
+                        print(f"Attempt {attempt + 1}: Request failed - {str(e)}")
+                        last_error = str(e)
+            finally:
+                sock.close()
+                
+        except OSError as e:
+            print(f"Attempt {attempt + 1}: Socket error - {str(e)}")
+            last_error = str(e)
+            await asyncio.sleep(1)  # Wait before retry
+            continue
+            
+    print(f"All {retries} attempts failed. Last error: {last_error}")
+    return None
 
-if __name__ == "__main__":
-    url = "https://example.com/path"  # Ganti dengan URL target
-    local_ip = "192.168.1.100"  # Ganti dengan IP lokal yang ingin digunakan
+async def main():
+    url = "https://12.12.12.2/index1.html"  # Replace with your target URL
+    local_ip = "192.168.1.161"    # Replace with your local IP
     
-    loop = asyncio.get_event_loop()
-    response = loop.run_until_complete(make_quic_request(url, local_ip))
+    print(f"Making QUIC request to {url} from {local_ip}")
+    
+    response = await make_quic_request(url, local_ip)
     
     if response:
-        print("Headers:", response["headers"])
-        print("Content:", response["content"].decode())
+        print("\nResponse Headers:")
+        for key, value in response["headers"].items():
+            print(f"{key}: {value}")
+        
+        print("\nResponse Content:")
+        print(response["content"].decode())
+    else:
+        print("Failed to get response")
+
+if __name__ == "__main__":
+    asyncio.run(main())
