@@ -1,183 +1,123 @@
 import asyncio
-from aioquic.asyncio import connect
+import socket
+from aioquic.asyncio import QuicConnectionProtocol, serve
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.h3.connection import H3_ALPN, H3Connection as BaseH3Connection
-from aioquic.h3.events import HeadersReceived, DataReceived
-from aioquic.h3.connection import H3Connection
-from urllib.parse import urlparse, urljoin
-import re
-import time
-import ssl
+from aioquic.quic.events import StreamDataReceived
+from aioquic.asyncio.client import connect
+from aioquic.h3.connection import H3_ALPN
+from aioquic.h3.events import HeadersReceived, DataReceived, H3Event
+from typing import Dict, Optional
 
-USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36'
-
-class H3ClientProtocol(QuicConnectionProtocol):
+class HttpQuicClientProtocol(QuicConnectionProtocol):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._http = H3Connection(self._quic)
-        self._events = asyncio.Queue()
+        self._http: Optional[H3Connection] = None
+        self._request_events: Dict[int, asyncio.Event] = {}
+        self._request_response: Dict[int, bytes] = {}
+        self._request_headers: Dict[int, Dict] = {}
+
+    async def get(self, url: str, headers: Dict = {}):
+        # Buat stream baru
+        stream_id = self._quic.get_next_available_stream_id()
+        
+        # Inisialisasi HTTP/3 connection jika belum ada
+        if self._http is None:
+            self._http = H3Connection(self._quic)
+        
+        # Kirim request headers
+        self._http.send_headers(
+            stream_id=stream_id,
+            headers=[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", url.split("/")[2].encode()),
+                (b":path", url.split("/")[3].encode()),
+                *[(k.encode(), v.encode()) for k, v in headers.items()],
+            ],
+        )
+        
+        # Akhiri stream
+        self._quic.send_stream_data(stream_id, b"", end_stream=True)
+        
+        # Tunggu response
+        event = asyncio.Event()
+        self._request_events[stream_id] = event
+        await event.wait()
+        
+        # Kembalikan response
+        return {
+            "headers": self._request_headers.pop(stream_id),
+            "content": self._request_response.pop(stream_id),
+        }
 
     def quic_event_received(self, event):
-        for h3_event in self._http.handle_event(event):
-            self._events.put_nowait(h3_event)
-
-    def send_headers(self, stream_id, headers):
-        if isinstance(headers, dict):
-            headers = list(headers.items())
-        self._http.send_headers(stream_id, headers)
-        self.transmit()  # Send the packet immediately
-
-    def send_data(self, stream_id, data):
-        self._http.send_data(stream_id, data, end_stream=True)
-        self.transmit()
-
-    async def wait_for_event(self):
-        return await self._events.get()
-
-
-class QUICClient:
-    def __init__(self, source_ip=None):
-        self.source_ip = source_ip
-        self.configuration = QuicConfiguration(
-            alpn_protocols=H3_ALPN,
-            is_client=True,
-            verify_mode=ssl.CERT_NONE  # ⚠️ Untuk testing saja
-        )
-        if source_ip:
-            self.configuration.local_address = (source_ip, 0)
-
-    async def fetch(self, url, method="GET", headers=None, body=None):
-        parsed = urlparse(url)
-        host = parsed.hostname
-        port = parsed.port or 443
-        path = parsed.path or "/"
-
-        if headers is None:
+        if self._http is not None:
+            for h3_event in self._http.handle_event(event):
+                self.h3_event_received(h3_event)
+        
+    def h3_event_received(self, event: H3Event):
+        if isinstance(event, HeadersReceived):
+            # Simpan headers response
             headers = {}
-        headers.update({
-            ":method": method,
-            ":scheme": parsed.scheme,
-            ":authority": parsed.netloc,
-            ":path": path,
-            "user-agent": USER_AGENT
-        })
+            for header, value in event.headers:
+                headers[header.decode()] = value.decode()
+            self._request_headers[event.stream_id] = headers
+            
+        elif isinstance(event, DataReceived):
+            # Simpan data response
+            if event.stream_id not in self._request_response:
+                self._request_response[event.stream_id] = b""
+            self._request_response[event.stream_id] += event.data
+            
+            if event.stream_ended:
+                self._request_events[event.stream_id].set()
+                self._request_events.pop(event.stream_id)
 
-        async with connect(
-            host,
-            port,
-            configuration=self.configuration,
-            create_protocol=H3ClientProtocol
-        ) as protocol:
-            stream_id = protocol.quic.get_next_available_stream_id()
-            protocol.send_headers(stream_id=stream_id, headers=headers)
-            if body:
-                protocol.send_data(stream_id=stream_id, data=body)
-
-            response_headers = {}
-            response_body = b""
-            response_status = None
-
-            while True:
-                event = await protocol.wait_for_event()
-                if isinstance(event, HeadersReceived):
-                    for header, value in event.headers:
-                        if header == b":status":
-                            response_status = int(value.decode())
-                        elif isinstance(header, bytes) and isinstance(value, bytes):
-                            response_headers[header.decode()] = value.decode()
-                elif isinstance(event, DataReceived):
-                    response_body += event.data
-                if event.stream_ended:
-                    break
-
-            return {
-                "status": response_status,
-                "headers": response_headers,
-                "content": response_body.decode(errors="ignore"),
-                "body": response_body
-            }
-
-
-def extract_links(html, base_url):
-    pattern = r'<img[^>]+src=["\'](.*?)["\']|<script[^>]+src=["\'](.*?)["\']|<link[^>]+href=["\'](.*?)["\']'
-    matches = re.findall(pattern, html, re.IGNORECASE)
-    links = set()
-    for match in matches:
-        for link in match:
-            if link:
-                absolute_link = urljoin(base_url, link)
-                links.add(absolute_link)
-    return links
-
-
-async def fetch_url_quic(client, url):
-    try:
-        start_time = time.time()
-        response = await client.fetch(url)
-        fetch_time = time.time() - start_time
-        return len(response['body']), response['status'], fetch_time
-    except Exception as e:
-        print(f"💥 Error fetching {url}: {e}")
-        return 0, None, 0
-
-
-async def measure_performance_once_quic(client, url):
-    try:
-        start_rtt = time.time()
-        response = await client.fetch(url)
-        rtt = (time.time() - start_rtt) * 1000
-        status_code = response['status']
-    except Exception as e:
-        print(f"💥 Error request: {e}")
-        return None
-
-    links = extract_links(response['content'], url)
-    total_size = len(response['body'])
-
-    start_fetch = time.time()
-    tasks = [fetch_url_quic(client, link) for link in links]
-    results = await asyncio.gather(*tasks)
-
-    for size, _, _ in results:
-        total_size += size
-
-    fetch_time = time.time() - start_fetch
-
-    throughput = (total_size / 1024) / fetch_time if fetch_time > 0 else 0
-    latency = fetch_time * 1000
-
-    return {
-        'rtt': rtt,
-        'total_size_kb': total_size / 1024,
-        'throughput_kbps': throughput,
-        'latency_ms': latency,
-        'status_code': status_code
-    }
-
-
-async def measure_multiple_requests_quic(url, source_ip, num_requests=10):
-    client = QUICClient(source_ip)
-    tasks = [measure_performance_once_quic(client, url) for _ in range(num_requests)]
-    results = await asyncio.gather(*tasks)
-
-    valid_results = [r for r in results if r is not None]
-    if not valid_results:
-        print("No successful requests")
-        return
-
-    avg_rtt = sum(r['rtt'] for r in valid_results) / len(valid_results)
-    avg_size = sum(r['total_size_kb'] for r in valid_results) / len(valid_results)
-    avg_throughput = sum(r['throughput_kbps'] for r in valid_results) / len(valid_results)
-    avg_latency = sum(r['latency_ms'] for r in valid_results) / len(valid_results)
-
-    print(f"\n🔥 Total Request: {len(valid_results)}")
-    print(f"⚡ Rata-rata RTT: {avg_rtt:.2f} ms")
-    print(f"📦 Rata-rata Size: {avg_size:.2f} KB")
-    print(f"🚀 Rata-rata Throughput: {avg_throughput:.2f} KB/s")
-    print(f"⏱️ Rata-rata Latency: {avg_latency:.2f} ms")
-
+async def make_quic_request(
+    url: str,
+    local_ip: str,
+    headers: Dict = None,
+    timeout: float = 10.0,
+):
+    # Konfigurasi QUIC
+    configuration = QuicConfiguration(
+        is_client=True,
+        alpn_protocols=H3_ALPN,
+        verify_mode=False  # Nonaktifkan verifikasi sertifikat untuk contoh
+    )
+    
+    # Buat socket dengan binding ke IP lokal
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((local_ip, 0))  # Binding ke IP lokal, port acak
+    
+    # Buat koneksi QUIC
+    async with connect(
+        host=url.split("/")[2],
+        port=443,
+        configuration=configuration,
+        create_protocol=HttpQuicClientProtocol,
+        local_port=sock.getsockname()[1],
+    ) as client:
+        client = cast(HttpQuicClientProtocol, client)
+        
+        # Lakukan request dengan timeout
+        try:
+            response = await asyncio.wait_for(
+                client.get(url, headers or {}),
+                timeout=timeout,
+            )
+            return response
+        except asyncio.TimeoutError:
+            print("Request timeout")
+            return None
 
 if __name__ == "__main__":
-    url = 'https://12.12.12.2/index1.html'
-    source_ip = '192.161.1.161'
-    asyncio.run(measure_multiple_requests_quic(url, source_ip, num_requests=10))
+    url = "https://example.com/path"  # Ganti dengan URL target
+    local_ip = "192.168.1.100"  # Ganti dengan IP lokal yang ingin digunakan
+    
+    loop = asyncio.get_event_loop()
+    response = loop.run_until_complete(make_quic_request(url, local_ip))
+    
+    if response:
+        print("Headers:", response["headers"])
+        print("Content:", response["content"].decode())
