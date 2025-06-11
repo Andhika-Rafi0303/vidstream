@@ -71,14 +71,23 @@ class QUICClient:
             }
 
 class H3Connection:
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._http = None
+    def __init__(self, quic, **kwargs):
+        self._quic = quic
+        self._http = BaseH3Connection(quic)
         
     def quic_event_received(self, event):
-        if self._http is None:
-            self._http = H3Connection(self._quic)
-        self._http.handle_event(event)
+        # Handle HTTP/3 events
+        for h3_event in self._http.handle_event(event):
+            yield h3_event
+            
+    def send_headers(self, stream_id, headers):
+        self._http.send_headers(stream_id, headers)
+        
+    def send_data(self, stream_id, data):
+        self._http.send_data(stream_id, data)
+        
+    async def wait_for_event(self):
+        return await self._http.wait_for_event()
 
 def extract_links(html, base_url):
     pattern = r'<img[^>]+src=["\'](.*?)["\']|<script[^>]+src=["\'](.*?)["\']|<link[^>]+href=["\'](.*?)["\']'
@@ -162,7 +171,7 @@ async def measure_multiple_requests_quic(url, source_ip, num_requests=10):
 
 if __name__ == "__main__":
     url = 'https://12.12.12.2/index1.html'  # Note: QUIC typically uses HTTPS
-    source_ip = '10.45.0.0'
+    source_ip = '192.161.1.161'
     
     # Run the async function
     asyncio.run(measure_multiple_requests_quic(url, source_ip, num_requests=10))
