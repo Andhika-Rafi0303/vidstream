@@ -18,17 +18,20 @@ def fetch_video_segment(session, url):
     try:
         start_time = time.time()
         response = session.get(url, timeout=10)
-        rtt = (time.time() - start_time) * 1000
+        rtt = (time.time() - start_time)
         size_kb = len(response.content) / 1024
         status_code = response.status_code
+        throughput = size_kb / rtt if rtt > 0 else 0  # KB/s
 
-        print(f"✅ {url} | Status: {status_code} | RTT: {rtt:.2f} ms | Size: {size_kb:.2f} KB")
-        return {'url': url, 'rtt': rtt, 'size_kb': size_kb, 'status_code': status_code}
+        print(f"✅ {url} | Status: {status_code} | RTT: {rtt * 1000:.2f} ms | Size: {size_kb:.2f} KB | Throughput: {throughput:.2f} KB/s")
+        return {'url': url, 'rtt': rtt, 'size_kb': size_kb, 'status_code': status_code, 'throughput': throughput}
     except requests.exceptions.RequestException as e:
         print(f"❌ {url} | Error: {e}")
-        return {'url': url, 'rtt': 0, 'size_kb': 0, 'status_code': None}
+        return {'url': url, 'rtt': 0, 'size_kb': 0, 'status_code': None, 'throughput': 0}
 
-def generate_sequential_traffic(base_url, start_segment, end_segment, source_ip):
+def generate_sequential_traffic(start_segment, end_segment, source_ip):
+    base_url = "http://12.12.12.2/output"
+
     session = requests.Session()
     session.mount('http://', SourceIPAdapter(source_ip))
     session.mount('https://', SourceIPAdapter(source_ip))
@@ -45,17 +48,21 @@ def generate_sequential_traffic(base_url, start_segment, end_segment, source_ip)
     valid_results = [r for r in results if r['status_code'] == 200]
 
     if valid_results:
-        avg_rtt = sum(r['rtt'] for r in valid_results) / len(valid_results)
+        avg_rtt = sum(r['rtt'] for r in valid_results) / len(valid_results) * 1000  # ms
         avg_size = sum(r['size_kb'] for r in valid_results) / len(valid_results)
+        avg_throughput = sum(r['throughput'] for r in valid_results) / len(valid_results)
 
         print("\n📊 Rekap Hasil:")
         print(f"📺 Total Berhasil: {len(valid_results)} dari {len(results)} segment")
         print(f"⚡ Rata-rata RTT: {avg_rtt:.2f} ms")
         print(f"📦 Rata-rata Size: {avg_size:.2f} KB")
+        print(f"🚀 Rata-rata Throughput: {avg_throughput:.2f} KB/s")
     else:
         print("\n❌ Tidak ada segment yang berhasil diakses.")
 
 if __name__ == "__main__":
-    base_url = "http://12.12.12.2/output"
-    source_ip = "10.60.0.3"
-    generate_sequential_traffic(base_url, start_segment=0, end_segment=2, source_ip=source_ip)
+    source_ip = input("Masukkan Source IP: ").strip()
+    start_segment = int(input("Masukkan Start Segment: "))
+    end_segment = int(input("Masukkan End Segment: "))
+
+    generate_sequential_traffic(start_segment, end_segment, source_ip)
