@@ -38,21 +38,26 @@ def generate_sequential_traffic(start_segment, end_segment, source_ip):
     session.headers.update({'User-Agent': USER_AGENT})
 
     results = []
-    program_start_time = time.time()
 
+    program_start_time = time.time()
     first_request_start_time = None
 
     for i in range(start_segment, end_segment + 1):
         segment_name = f"segment_{i:03d}.mp4"
         full_url = f"{base_url}/{segment_name}"
 
+        # Catat waktu request PERTAMA DI MULAI
         if first_request_start_time is None:
             first_request_start_time = time.time()
 
         result = fetch_video_segment(session, full_url)
         results.append(result)
 
-    startup_delay = first_request_start_time - program_start_time if first_request_start_time else 0
+    # Hitung startup delay dalam detik
+    if first_request_start_time:
+        startup_delay = first_request_start_time - program_start_time
+    else:
+        startup_delay = 0
 
     valid_results = [r for r in results if isinstance(r, dict) and r.get('status_code') == 200]
 
@@ -69,7 +74,7 @@ def generate_sequential_traffic(start_segment, end_segment, source_ip):
         print(f"🚀 Rata-rata Throughput: {avg_throughput:.2f} KB/s")
     else:
         print("\n❌ Tidak ada segment yang berhasil diakses.")
-
+        
 if __name__ == "__main__":
     source_ip = input("Masukkan Source IP: ").strip()
     start_segment = int(input("Masukkan Start Segment: "))
