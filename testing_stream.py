@@ -38,14 +38,23 @@ def generate_sequential_traffic(start_segment, end_segment, source_ip):
     session.headers.update({'User-Agent': USER_AGENT})
 
     results = []
+    program_start_time = time.time()
+
+    first_request_start_time = None
 
     for i in range(start_segment, end_segment + 1):
         segment_name = f"segment_{i:03d}.mp4"
         full_url = f"{base_url}/{segment_name}"
+
+        if first_request_start_time is None:
+            first_request_start_time = time.time()
+
         result = fetch_video_segment(session, full_url)
         results.append(result)
 
-    valid_results = [r for r in results if r['status_code'] == 200]
+    startup_delay = first_request_start_time - program_start_time if first_request_start_time else 0
+
+    valid_results = [r for r in results if isinstance(r, dict) and r.get('status_code') == 200]
 
     if valid_results:
         avg_rtt = sum(r['rtt'] for r in valid_results) / len(valid_results) * 1000  # ms
@@ -53,6 +62,7 @@ def generate_sequential_traffic(start_segment, end_segment, source_ip):
         avg_throughput = sum(r['throughput'] for r in valid_results) / len(valid_results)
 
         print("\n📊 Rekap Hasil:")
+        print(f"⏱️ Startup Delay: {startup_delay:.2f} detik")
         print(f"📺 Total Berhasil: {len(valid_results)} dari {len(results)} segment")
         print(f"⚡ Rata-rata RTT: {avg_rtt:.2f} ms")
         print(f"📦 Rata-rata Size: {avg_size:.2f} KB")
