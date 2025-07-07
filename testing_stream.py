@@ -14,8 +14,13 @@ class SourceIPAdapter(HTTPAdapter):
         kwargs['source_address'] = (self.source_address, 0)
         return super(SourceIPAdapter, self).init_poolmanager(*args, **kwargs)
 
-def fetch_video_segment(session, url):
+def fetch_video_segment(session, url, record_start=False):
     try:
+        if record_start:
+            start_request_time = time.time()
+        else:
+            start_request_time = None
+
         start_time = time.time()
         response = session.get(url, timeout=10)
         rtt = (time.time() - start_time)
@@ -24,10 +29,24 @@ def fetch_video_segment(session, url):
         throughput = size_kb / rtt if rtt > 0 else 0  # KB/s
 
         print(f"✅ {url} | Status: {status_code} | RTT: {rtt * 1000:.2f} ms | Size: {size_kb:.2f} KB | Throughput: {throughput:.2f} KB/s")
-        return {'url': url, 'rtt': rtt, 'size_kb': size_kb, 'status_code': status_code, 'throughput': throughput}
+        return {
+            'url': url,
+            'rtt': rtt,
+            'size_kb': size_kb,
+            'status_code': status_code,
+            'throughput': throughput,
+            'start_request_time': start_request_time
+        }
     except requests.exceptions.RequestException as e:
         print(f"❌ {url} | Error: {e}")
-        return {'url': url, 'rtt': 0, 'size_kb': 0, 'status_code': None, 'throughput': 0}
+        return {
+            'url': url,
+            'rtt': 0,
+            'size_kb': 0,
+            'status_code': None,
+            'throughput': 0,
+            'start_request_time': start_request_time
+        }
 
 def generate_sequential_traffic(start_segment, end_segment, source_ip):
     base_url = "http://12.12.12.2/output"
@@ -46,18 +65,17 @@ def generate_sequential_traffic(start_segment, end_segment, source_ip):
         segment_name = f"segment_{i:03d}.mp4"
         full_url = f"{base_url}/{segment_name}"
 
-        # Catat waktu request PERTAMA DI MULAI
-        if first_request_start_time is None:
-            first_request_start_time = time.time()
+        # Cuma set True buat request pertama
+        record_start = True if first_request_start_time is None else False
 
-        result = fetch_video_segment(session, full_url)
+        result = fetch_video_segment(session, full_url, record_start=record_start)
+
+        if result.get('start_request_time') and first_request_start_time is None:
+            first_request_start_time = result['start_request_time']
+
         results.append(result)
 
-    # Hitung startup delay dalam detik
-    if first_request_start_time:
-        startup_delay = first_request_start_time - program_start_time
-    else:
-        startup_delay = 0
+    startup_delay = (first_request_start_time - program_start_time) if first_request_start_time else 0
 
     valid_results = [r for r in results if isinstance(r, dict) and r.get('status_code') == 200]
 
